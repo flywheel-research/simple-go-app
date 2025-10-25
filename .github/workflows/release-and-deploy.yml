@@ -118,174 +118,31 @@ jobs:
           prerelease: false
           files: simple-go-app-linux-amd64
 
-  # 方案 1：SSH 直接部署（可选，默认禁用）
-  # 要启用 SSH 部署，请取消下面的注释并配置 secrets
-  deploy-ssh:
-    name: Deploy via SSH
-    needs: build
-    runs-on: ubuntu-latest
-    # 手动触发或配置了 SSH secrets 时运行
-    if: |
-      false &&
-      github.event_name == 'push' &&
-      !contains(github.ref, '-dev') &&
-      !contains(github.ref, '-beta')
-
-    steps:
-      - name: Checkout deploy scripts
-        uses: actions/checkout@v4
-
-      - name: Setup SSH
-        run: |
-          echo "🔐 Setting up SSH..."
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
-
-      - name: Deploy to servers
-        run: |
-          VERSION="${{ needs.build.outputs.version }}"
-          SERVERS='${{ secrets.DEPLOY_SERVERS }}'
-
-          echo "🚀 Deploying version: $VERSION"
-          echo ""
-
-          # Parse JSON and deploy to each server
-          echo "$SERVERS" | jq -c '.[]' | while read server; do
-            NAME=$(echo $server | jq -r '.name')
-            HOST=$(echo $server | jq -r '.host')
-            USER=$(echo $server | jq -r '.user')
-            ENV=$(echo $server | jq -r '.environment')
-
-            echo "📡 Deploying to $NAME ($HOST)..."
-
-            # Upload deploy script
-            scp -o StrictHostKeyChecking=no \
-                deploy/deploy.sh \
-                ${USER}@${HOST}:/tmp/deploy.sh
-
-            # Execute deployment
-            ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
-                "chmod +x /tmp/deploy.sh && sudo /tmp/deploy.sh ${VERSION} ${ENV}" || {
-                echo "❌ Deployment to $NAME failed"
-                exit 1
-            }
-
-            # Verify deployment
-            DEPLOYED_VERSION=$(ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
-                "curl -s http://localhost:8080/version | jq -r '.version'" || echo "unknown")
-
-            if [ "$DEPLOYED_VERSION" = "${VERSION#v}" ]; then
-                echo "✅ $NAME deployed successfully (version: $DEPLOYED_VERSION)"
-            else
-                echo "⚠️  $NAME version mismatch (expected: ${VERSION#v}, got: $DEPLOYED_VERSION)"
-            fi
-
-            echo ""
-          done
-
-          echo "✅ All deployments completed"
-
-      - name: Send notification
-        if: always()
-        run: |
-          # 这里可以发送通知到 Slack/Email/etc
-          echo "📧 Deployment notification sent"
-          echo "   Version: ${{ needs.build.outputs.version }}"
-          echo "   Status: ${{ job.status }}"
-
-  # 方案 2：触发 Webhook（可选，推荐使用 GitHub 内置 webhook）
-  # 注意：推荐直接在 GitHub Settings -> Webhooks 配置，无需此 job
-  trigger-webhook:
-    name: Trigger Webhook
-    needs: build
-    runs-on: ubuntu-latest
-    # 默认禁用，推荐使用 GitHub 内置 webhook 功能
-    if: |
-      false &&
-      github.event_name == 'push' &&
-      !contains(github.ref, '-dev') &&
-      !contains(github.ref, '-beta')
-
-    steps:
-      - name: Trigger deployment webhook
-        run: |
-          VERSION="${{ needs.build.outputs.version }}"
-          WEBHOOK_URLS='${{ secrets.WEBHOOK_URLS }}'
-
-          echo "🔔 Triggering webhooks for version: $VERSION"
-          echo ""
-
-          # Parse JSON and trigger each webhook
-          echo "$WEBHOOK_URLS" | jq -c '.[]' | while read webhook; do
-            NAME=$(echo $webhook | jq -r '.name')
-            URL=$(echo $webhook | jq -r '.url')
-            SECRET=$(echo $webhook | jq -r '.secret')
-
-            echo "📡 Triggering $NAME..."
-
-            # Calculate signature
-            PAYLOAD="{\"version\":\"${VERSION}\",\"timestamp\":\"$(date -u +%s)\"}"
-            SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
-
-            # Send webhook
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$URL" \
-                -H "Content-Type: application/json" \
-                -H "X-Signature: sha256=$SIGNATURE" \
-                -d "$PAYLOAD")
-
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            BODY=$(echo "$RESPONSE" | head -n-1)
-
-            if [ "$HTTP_CODE" = "200" ]; then
-                echo "✅ $NAME triggered successfully"
-            else
-                echo "❌ $NAME failed (HTTP $HTTP_CODE): $BODY"
-            fi
-
-            echo ""
-          done
-
-          echo "✅ All webhooks triggered"
-
-  # 方案 3：通过 JumpServer API 部署（可选，默认禁用）
-  deploy-jumpserver:
-    name: Deploy via JumpServer
-    needs: build
-    runs-on: ubuntu-latest
-    # 默认禁用，如需使用请修改条件并配置相应 secrets
-    if: |
-      false &&
-      github.event_name == 'push' &&
-      !contains(github.ref, '-dev') &&
-      !contains(github.ref, '-beta')
-
-    steps:
-      - name: Deploy via JumpServer API
-        run: |
-          VERSION="${{ needs.build.outputs.version }}"
-          JUMPSERVER_URL="${{ secrets.JUMPSERVER_URL }}"
-          JUMPSERVER_TOKEN="${{ secrets.JUMPSERVER_TOKEN }}"
-
-          echo "🚀 Deploying via JumpServer: $VERSION"
-
-          # 调用 JumpServer API 批量执行命令
-          COMMAND="curl -sSL https://github.com/${{ github.repository }}/raw/main/deploy/deploy.sh | sudo bash -s ${VERSION} prod"
-
-          curl -X POST "${JUMPSERVER_URL}/api/v1/ops/adhoc/" \
-            -H "Authorization: Bearer ${JUMPSERVER_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"hosts\": ${{ secrets.JUMPSERVER_HOSTS }},
-              \"tasks\": [{
-                \"name\": \"deploy\",
-                \"action\": {
-                  \"module\": \"shell\",
-                  \"args\": \"${COMMAND}\"
-                }
-              }]
-            }"
-
-          echo "✅ JumpServer deployment triggered"
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 自动部署配置说明
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  #
+  # 本项目使用 GitHub Webhook 实现自动部署，无需在 workflow 中配置部署逻辑。
+  #
+  # 配置步骤：
+  #
+  # 1. 在服务器上安装 webhook-server：
+  #    curl -sSL https://raw.githubusercontent.com/flywheel-research/simple-go-app/main/install-webhook-server.sh | sudo bash
+  #
+  # 2. 在 GitHub 配置 Webhook：
+  #    Repository → Settings → Webhooks → Add webhook
+  #    - Payload URL: http://your-server:9666/webhook
+  #    - Content type: application/json
+  #    - Secret: (webhook secret)
+  #    - Events: ✓ Releases only
+  #
+  # 3. 工作流程：
+  #    - 推送 tag → GitHub Actions 构建 → 创建 Release
+  #    - GitHub 触发 Webhook → 服务器接收通知
+  #    - webhook-server.py 调用 deploy.sh
+  #    - 从 GitHub Release 下载二进制并部署
+  #
+  # 参考文档：
+  # - WEBHOOK_SETUP.md - Webhook 完整配置指南
+  # - QUICK_START.md - 快速开始指南
+  # - README.md - 完整项目文档
