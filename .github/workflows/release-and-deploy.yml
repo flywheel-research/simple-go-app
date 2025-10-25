@@ -1,0 +1,317 @@
+name: Release and Deploy
+
+# 此 workflow 包含完整的 CI/CD 流程
+# CI: 构建二进制文件并创建 GitHub Release
+# CD: 自动部署到服务器（默认禁用，推荐使用 Webhook 方式）
+#
+# 推荐部署方式：
+# 1. GitHub Release 创建后，会自动触发配置好的 Webhook
+# 2. 服务器上的 webhook-server.py 接收通知并自动部署
+# 3. 无需在此 workflow 中配置部署逻辑
+#
+# 参考文档：
+# - WEBHOOK_SETUP.md: Webhook 配置指南
+# - AUTO_DEPLOY_GUIDE.md: 部署方案对比
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Get version info
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          echo "git_commit=$GIT_COMMIT" >> $GITHUB_OUTPUT
+
+          echo "📦 Version: $VERSION"
+          echo "⏰ Build Time: $BUILD_TIME"
+          echo "🔖 Git Commit: $GIT_COMMIT"
+
+      - name: Build binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_TIME: ${{ steps.version.outputs.build_time }}
+          GIT_COMMIT: ${{ steps.version.outputs.git_commit }}
+        run: |
+          echo "🔨 Building binaries..."
+
+          # Build for Linux AMD64
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
+            -o simple-go-app-linux-amd64 .
+
+          # Build for Linux ARM64
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
+            -o simple-go-app-linux-arm64 .
+
+          # Make binaries executable
+          chmod +x simple-go-app-*
+
+          # Show file info
+          ls -lh simple-go-app-*
+
+          echo "✅ Build completed"
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## 🚀 Release ${{ steps.version.outputs.version }}
+
+            ### 📦 Built Artifacts
+            - `simple-go-app-linux-amd64` - Linux AMD64
+            - `simple-go-app-linux-arm64` - Linux ARM64
+
+            ### 📝 Build Info
+            - **Version:** ${{ steps.version.outputs.version }}
+            - **Build Time:** ${{ steps.version.outputs.build_time }}
+            - **Git Commit:** ${{ steps.version.outputs.git_commit }}
+
+            ### 📥 Installation
+            ```bash
+            # Download binary
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/simple-go-app-linux-amd64
+
+            # Make executable
+            chmod +x simple-go-app-linux-amd64
+
+            # Run
+            ./simple-go-app-linux-amd64
+            ```
+
+            ### 🚀 Auto Deploy
+            This release will be automatically deployed to configured servers.
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset (AMD64)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./simple-go-app-linux-amd64
+          asset_name: simple-go-app-linux-amd64
+          asset_content_type: application/octet-stream
+
+      - name: Upload Release Asset (ARM64)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./simple-go-app-linux-arm64
+          asset_name: simple-go-app-linux-arm64
+          asset_content_type: application/octet-stream
+
+  # 方案 1：SSH 直接部署（可选，默认禁用）
+  # 要启用 SSH 部署，请取消下面的注释并配置 secrets
+  deploy-ssh:
+    name: Deploy via SSH
+    needs: build
+    runs-on: ubuntu-latest
+    # 手动触发或配置了 SSH secrets 时运行
+    if: |
+      false &&
+      github.event_name == 'push' &&
+      !contains(github.ref, '-dev') &&
+      !contains(github.ref, '-beta')
+
+    steps:
+      - name: Checkout deploy scripts
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          echo "🔐 Setting up SSH..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy to servers
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          SERVERS='${{ secrets.DEPLOY_SERVERS }}'
+
+          echo "🚀 Deploying version: $VERSION"
+          echo ""
+
+          # Parse JSON and deploy to each server
+          echo "$SERVERS" | jq -c '.[]' | while read server; do
+            NAME=$(echo $server | jq -r '.name')
+            HOST=$(echo $server | jq -r '.host')
+            USER=$(echo $server | jq -r '.user')
+            ENV=$(echo $server | jq -r '.environment')
+
+            echo "📡 Deploying to $NAME ($HOST)..."
+
+            # Upload deploy script
+            scp -o StrictHostKeyChecking=no \
+                deploy/deploy.sh \
+                ${USER}@${HOST}:/tmp/deploy.sh
+
+            # Execute deployment
+            ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+                "chmod +x /tmp/deploy.sh && sudo /tmp/deploy.sh ${VERSION} ${ENV}" || {
+                echo "❌ Deployment to $NAME failed"
+                exit 1
+            }
+
+            # Verify deployment
+            DEPLOYED_VERSION=$(ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+                "curl -s http://localhost:8080/version | jq -r '.version'" || echo "unknown")
+
+            if [ "$DEPLOYED_VERSION" = "${VERSION#v}" ]; then
+                echo "✅ $NAME deployed successfully (version: $DEPLOYED_VERSION)"
+            else
+                echo "⚠️  $NAME version mismatch (expected: ${VERSION#v}, got: $DEPLOYED_VERSION)"
+            fi
+
+            echo ""
+          done
+
+          echo "✅ All deployments completed"
+
+      - name: Send notification
+        if: always()
+        run: |
+          # 这里可以发送通知到 Slack/Email/etc
+          echo "📧 Deployment notification sent"
+          echo "   Version: ${{ needs.build.outputs.version }}"
+          echo "   Status: ${{ job.status }}"
+
+  # 方案 2：触发 Webhook（可选，推荐使用 GitHub 内置 webhook）
+  # 注意：推荐直接在 GitHub Settings -> Webhooks 配置，无需此 job
+  trigger-webhook:
+    name: Trigger Webhook
+    needs: build
+    runs-on: ubuntu-latest
+    # 默认禁用，推荐使用 GitHub 内置 webhook 功能
+    if: |
+      false &&
+      github.event_name == 'push' &&
+      !contains(github.ref, '-dev') &&
+      !contains(github.ref, '-beta')
+
+    steps:
+      - name: Trigger deployment webhook
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          WEBHOOK_URLS='${{ secrets.WEBHOOK_URLS }}'
+
+          echo "🔔 Triggering webhooks for version: $VERSION"
+          echo ""
+
+          # Parse JSON and trigger each webhook
+          echo "$WEBHOOK_URLS" | jq -c '.[]' | while read webhook; do
+            NAME=$(echo $webhook | jq -r '.name')
+            URL=$(echo $webhook | jq -r '.url')
+            SECRET=$(echo $webhook | jq -r '.secret')
+
+            echo "📡 Triggering $NAME..."
+
+            # Calculate signature
+            PAYLOAD="{\"version\":\"${VERSION}\",\"timestamp\":\"$(date -u +%s)\"}"
+            SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
+
+            # Send webhook
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$URL" \
+                -H "Content-Type: application/json" \
+                -H "X-Signature: sha256=$SIGNATURE" \
+                -d "$PAYLOAD")
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | head -n-1)
+
+            if [ "$HTTP_CODE" = "200" ]; then
+                echo "✅ $NAME triggered successfully"
+            else
+                echo "❌ $NAME failed (HTTP $HTTP_CODE): $BODY"
+            fi
+
+            echo ""
+          done
+
+          echo "✅ All webhooks triggered"
+
+  # 方案 3：通过 JumpServer API 部署（可选，默认禁用）
+  deploy-jumpserver:
+    name: Deploy via JumpServer
+    needs: build
+    runs-on: ubuntu-latest
+    # 默认禁用，如需使用请修改条件并配置相应 secrets
+    if: |
+      false &&
+      github.event_name == 'push' &&
+      !contains(github.ref, '-dev') &&
+      !contains(github.ref, '-beta')
+
+    steps:
+      - name: Deploy via JumpServer API
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          JUMPSERVER_URL="${{ secrets.JUMPSERVER_URL }}"
+          JUMPSERVER_TOKEN="${{ secrets.JUMPSERVER_TOKEN }}"
+
+          echo "🚀 Deploying via JumpServer: $VERSION"
+
+          # 调用 JumpServer API 批量执行命令
+          COMMAND="curl -sSL https://github.com/${{ github.repository }}/raw/main/deploy/deploy.sh | sudo bash -s ${VERSION} prod"
+
+          curl -X POST "${JUMPSERVER_URL}/api/v1/ops/adhoc/" \
+            -H "Authorization: Bearer ${JUMPSERVER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"hosts\": ${{ secrets.JUMPSERVER_HOSTS }},
+              \"tasks\": [{
+                \"name\": \"deploy\",
+                \"action\": {
+                  \"module\": \"shell\",
+                  \"args\": \"${COMMAND}\"
+                }
+              }]
+            }"
+
+          echo "✅ JumpServer deployment triggered"

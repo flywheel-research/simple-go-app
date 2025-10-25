@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Get version info
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          echo "git_commit=$GIT_COMMIT" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_TIME: ${{ steps.version.outputs.build_time }}
+          GIT_COMMIT: ${{ steps.version.outputs.git_commit }}
+        run: |
+          # Build for Linux AMD64
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
+            -o simple-go-app-linux-amd64 .
+
+          # Build for Linux ARM64
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
+            -o simple-go-app-linux-arm64 .
+
+          # Make binaries executable
+          chmod +x simple-go-app-*
+
+          # Show file info
+          ls -lh simple-go-app-*
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## 🚀 Release ${{ steps.version.outputs.version }}
+
+            ### 📦 Built Artifacts
+            - `simple-go-app-linux-amd64` - Linux AMD64
+            - `simple-go-app-linux-arm64` - Linux ARM64
+
+            ### 📝 Build Info
+            - **Version:** ${{ steps.version.outputs.version }}
+            - **Build Time:** ${{ steps.version.outputs.build_time }}
+            - **Git Commit:** ${{ steps.version.outputs.git_commit }}
+
+            ### 📥 Installation
+            ```bash
+            # Download binary
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/simple-go-app-linux-amd64
+
+            # Make executable
+            chmod +x simple-go-app-linux-amd64
+
+            # Run
+            ./simple-go-app-linux-amd64
+            ```
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset (AMD64)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./simple-go-app-linux-amd64
+          asset_name: simple-go-app-linux-amd64
+          asset_content_type: application/octet-stream
+
+      - name: Upload Release Asset (ARM64)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./simple-go-app-linux-arm64
+          asset_name: simple-go-app-linux-arm64
+          asset_content_type: application/octet-stream
+
+  deploy-dev:
+    name: Deploy to Dev Environment
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-dev')
+
+    steps:
+      - name: Deploy to Dev Servers
+        run: |
+          echo "🚀 Deploying to Dev environment..."
+          # 这里会调用部署脚本
+          # curl -X POST https://your-deploy-service/deploy \
+          #   -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
+          #   -d '{"environment": "dev", "version": "${{ github.ref_name }}"}'
+
+  deploy-prod:
+    name: Deploy to Production Environment
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-dev') && !contains(github.ref, '-beta')
+
+    steps:
+      - name: Deploy to Production Servers
+        run: |
+          echo "🚀 Deploying to Production environment..."
+          # 这里会调用部署脚本
+          # curl -X POST https://your-deploy-service/deploy \
+          #   -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
+          #   -d '{"environment": "prod", "version": "${{ github.ref_name }}"}'
