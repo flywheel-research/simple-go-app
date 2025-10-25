@@ -64,14 +64,11 @@ jobs:
           # Show file info
           ls -lh simple-go-app-*
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          release_name: Release ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
           body: |
             ## 🚀 Release ${{ steps.version.outputs.version }}
 
@@ -97,26 +94,9 @@ jobs:
             ```
           draft: false
           prerelease: false
-
-      - name: Upload Release Asset (AMD64)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./simple-go-app-linux-amd64
-          asset_name: simple-go-app-linux-amd64
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (ARM64)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./simple-go-app-linux-arm64
-          asset_name: simple-go-app-linux-arm64
-          asset_content_type: application/octet-stream
+          files: |
+            simple-go-app-linux-amd64
+            simple-go-app-linux-arm64
 
   deploy-dev:
     name: Deploy to Dev Environment
