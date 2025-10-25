@@ -28,6 +28,8 @@ jobs:
   build:
     name: Build and Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -74,33 +76,24 @@ jobs:
             -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
             -o simple-go-app-linux-amd64 .
 
-          # Build for Linux ARM64
-          GOOS=linux GOARCH=arm64 go build \
-            -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
-            -o simple-go-app-linux-arm64 .
-
-          # Make binaries executable
-          chmod +x simple-go-app-*
+          # Make binary executable
+          chmod +x simple-go-app-linux-amd64
 
           # Show file info
           ls -lh simple-go-app-*
 
           echo "✅ Build completed"
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          release_name: Release ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
           body: |
             ## 🚀 Release ${{ steps.version.outputs.version }}
 
             ### 📦 Built Artifacts
             - `simple-go-app-linux-amd64` - Linux AMD64
-            - `simple-go-app-linux-arm64` - Linux ARM64
 
             ### 📝 Build Info
             - **Version:** ${{ steps.version.outputs.version }}
@@ -120,29 +113,10 @@ jobs:
             ```
 
             ### 🚀 Auto Deploy
-            This release will be automatically deployed to configured servers.
+            This release will be automatically deployed to configured servers via webhook.
           draft: false
           prerelease: false
-
-      - name: Upload Release Asset (AMD64)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./simple-go-app-linux-amd64
-          asset_name: simple-go-app-linux-amd64
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (ARM64)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./simple-go-app-linux-arm64
-          asset_name: simple-go-app-linux-arm64
-          asset_content_type: application/octet-stream
+          files: simple-go-app-linux-amd64
 
   # 方案 1：SSH 直接部署（可选，默认禁用）
   # 要启用 SSH 部署，请取消下面的注释并配置 secrets
