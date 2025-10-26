@@ -160,13 +160,27 @@ if [ ${BACKUP_COUNT} -gt ${MAX_BACKUPS} ]; then
     log_success "清理完成"
 fi
 
+# 检查是否使用 supervisor 管理服务
+USE_SUPERVISOR=false
+if command -v supervisorctl &>/dev/null && [ -d /etc/supervisor/conf.d ]; then
+    USE_SUPERVISOR=true
+fi
+
 # 停止服务
 log_info "停止服务..."
-if sudo supervisorctl status ${APP_NAME} &>/dev/null; then
-    sudo supervisorctl stop ${APP_NAME}
-    log_success "服务已停止"
+if [ "${USE_SUPERVISOR}" = true ]; then
+    if sudo supervisorctl status ${APP_NAME} &>/dev/null; then
+        sudo supervisorctl stop ${APP_NAME}
+        log_success "服务已停止"
+    else
+        log_warning "服务未在 supervisor 中运行"
+    fi
 else
-    log_warning "服务未运行"
+    # 尝试通过进程名停止服务
+    if pgrep -f "${INSTALL_DIR}/${APP_NAME}" &>/dev/null; then
+        log_warning "检测到运行中的进程，请手动停止服务"
+        log_warning "运行: pkill -f ${INSTALL_DIR}/${APP_NAME}"
+    fi
 fi
 
 # 部署新版本
@@ -176,10 +190,11 @@ sudo chmod +x "${INSTALL_DIR}/${APP_NAME}"
 echo "${VERSION}" | sudo tee "${INSTALL_DIR}/.current_version" > /dev/null
 log_success "部署完成"
 
-# 创建/更新 supervisor 配置
-log_info "配置 supervisor..."
-SUPERVISOR_CONF="/etc/supervisor/conf.d/${APP_NAME}.conf"
-sudo tee ${SUPERVISOR_CONF} > /dev/null <<EOF
+# 配置 supervisor（如果可用）
+if [ "${USE_SUPERVISOR}" = true ]; then
+    log_info "配置 supervisor..."
+    SUPERVISOR_CONF="/etc/supervisor/conf.d/${APP_NAME}.conf"
+    sudo tee ${SUPERVISOR_CONF} > /dev/null <<EOF
 [program:${APP_NAME}]
 command=${INSTALL_DIR}/${APP_NAME}
 directory=${INSTALL_DIR}
@@ -192,43 +207,54 @@ stderr_logfile=/var/log/${APP_NAME}.log
 environment=PORT="8080",ENV="${ENVIRONMENT}"
 EOF
 
-# 重载 supervisor 配置
-sudo supervisorctl reread
-sudo supervisorctl update
-log_success "Supervisor 配置完成"
+    # 重载 supervisor 配置
+    sudo supervisorctl reread
+    sudo supervisorctl update
+    log_success "Supervisor 配置完成"
 
-# 启动服务
-log_info "启动服务..."
-sudo supervisorctl start ${APP_NAME}
-sleep 3
+    # 启动服务
+    log_info "启动服务..."
+    sudo supervisorctl start ${APP_NAME}
+    sleep 3
 
-# 验证服务状态
-log_info "验证服务状态..."
-if sudo supervisorctl status ${APP_NAME} | grep -q "RUNNING"; then
-    log_success "✓ 服务运行正常"
+    # 验证服务状态
+    log_info "验证服务状态..."
+    if sudo supervisorctl status ${APP_NAME} | grep -q "RUNNING"; then
+        log_success "✓ 服务运行正常"
+    else
+        log_error "✗ 服务启动失败"
+        sudo supervisorctl status ${APP_NAME}
+        exit 1
+    fi
+
+    # 健康检查
+    log_info "健康检查..."
+    sleep 2
+    if curl -s http://localhost:8080/health | grep -q "healthy"; then
+        log_success "✓ 健康检查通过"
+    else
+        log_error "✗ 健康检查失败"
+        exit 1
+    fi
+
+    # 版本验证
+    log_info "版本验证..."
+    DEPLOYED_VERSION=$(curl -s http://localhost:8080/version | jq -r '.version' 2>/dev/null || echo "unknown")
+    if [ "${DEPLOYED_VERSION}" = "${VERSION#v}" ]; then
+        log_success "✓ 版本验证通过: ${DEPLOYED_VERSION}"
+    else
+        log_warning "⚠ 版本不匹配: 期望 ${VERSION#v}, 实际 ${DEPLOYED_VERSION}"
+    fi
 else
-    log_error "✗ 服务启动失败"
-    sudo supervisorctl status ${APP_NAME}
-    exit 1
-fi
-
-# 健康检查
-log_info "健康检查..."
-sleep 2
-if curl -s http://localhost:8080/health | grep -q "healthy"; then
-    log_success "✓ 健康检查通过"
-else
-    log_error "✗ 健康检查失败"
-    exit 1
-fi
-
-# 版本验证
-log_info "版本验证..."
-DEPLOYED_VERSION=$(curl -s http://localhost:8080/version | jq -r '.version' 2>/dev/null || echo "unknown")
-if [ "${DEPLOYED_VERSION}" = "${VERSION#v}" ]; then
-    log_success "✓ 版本验证通过: ${DEPLOYED_VERSION}"
-else
-    log_warning "⚠ 版本不匹配: 期望 ${VERSION#v}, 实际 ${DEPLOYED_VERSION}"
+    # Supervisor 不可用，提供手动启动说明
+    log_warning "Supervisor 未安装或未配置"
+    log_info "部署已完成，但服务未自动启动"
+    log_info "手动启动服务："
+    log_info "  ${INSTALL_DIR}/${APP_NAME} &"
+    log_info ""
+    log_info "或者安装 supervisor 实现自动管理："
+    log_info "  yum install -y supervisor  # RHEL/CentOS"
+    log_info "  apt install -y supervisor  # Debian/Ubuntu"
 fi
 
 echo ""
