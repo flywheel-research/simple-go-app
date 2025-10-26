@@ -16,6 +16,33 @@ VERSIONS_DIR="/opt/${APP_NAME}/versions"
 CONFIG_FILE="/opt/${APP_NAME}/config.json"
 MAX_BACKUPS=5
 
+# 代理配置（可选）
+# 支持通过环境变量或配置文件设置代理
+# 环境变量优先级高于配置文件
+HTTP_PROXY="${HTTP_PROXY:-}"
+HTTPS_PROXY="${HTTPS_PROXY:-}"
+
+# 从配置文件读取代理设置（如果环境变量未设置）
+if [ -z "${HTTP_PROXY}" ] && [ -f "${CONFIG_FILE}" ]; then
+    HTTP_PROXY=$(grep -oP '"http_proxy":\s*"\K[^"]+' "${CONFIG_FILE}" 2>/dev/null || echo "")
+fi
+if [ -z "${HTTPS_PROXY}" ] && [ -f "${CONFIG_FILE}" ]; then
+    HTTPS_PROXY=$(grep -oP '"https_proxy":\s*"\K[^"]+' "${CONFIG_FILE}" 2>/dev/null || echo "")
+fi
+
+# 构建 curl 代理参数
+CURL_PROXY_ARGS=""
+if [ -n "${HTTP_PROXY}" ]; then
+    CURL_PROXY_ARGS="${CURL_PROXY_ARGS} --proxy ${HTTP_PROXY}"
+fi
+if [ -n "${HTTPS_PROXY}" ] && [ -z "${HTTP_PROXY}" ]; then
+    CURL_PROXY_ARGS="${CURL_PROXY_ARGS} --proxy ${HTTPS_PROXY}"
+fi
+
+# 下载超时和重试配置
+DOWNLOAD_TIMEOUT=600  # 10分钟
+DOWNLOAD_RETRIES=3    # 重试3次
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -52,6 +79,9 @@ ENVIRONMENT=${2:-prod}
 log_info "========================================="
 log_info "  部署 ${APP_NAME} ${VERSION}"
 log_info "  环境: ${ENVIRONMENT}"
+if [ -n "${CURL_PROXY_ARGS}" ]; then
+    log_info "  代理: ${HTTPS_PROXY:-${HTTP_PROXY}}"
+fi
 log_info "========================================="
 
 # 创建必要的目录
@@ -69,10 +99,37 @@ DOWNLOAD_PATH="${VERSIONS_DIR}/${APP_NAME}-${VERSION}"
 if [ -f "${DOWNLOAD_PATH}" ]; then
     log_warning "版本 ${VERSION} 已存在，跳过下载"
 else
-    if ! sudo curl -L -o "${DOWNLOAD_PATH}" "${BINARY_URL}"; then
-        log_error "下载失败: ${BINARY_URL}"
+    # 使用重试机制下载
+    DOWNLOAD_SUCCESS=0
+    for i in $(seq 1 ${DOWNLOAD_RETRIES}); do
+        log_info "下载尝试 ${i}/${DOWNLOAD_RETRIES}..."
+
+        # 构建 curl 命令
+        CURL_CMD="sudo curl -L --max-time ${DOWNLOAD_TIMEOUT} --connect-timeout 30"
+        if [ -n "${CURL_PROXY_ARGS}" ]; then
+            CURL_CMD="${CURL_CMD} ${CURL_PROXY_ARGS}"
+        fi
+        CURL_CMD="${CURL_CMD} -o \"${DOWNLOAD_PATH}\" \"${BINARY_URL}\""
+
+        # 执行下载
+        if eval ${CURL_CMD}; then
+            DOWNLOAD_SUCCESS=1
+            break
+        else
+            log_warning "下载失败，等待 5 秒后重试..."
+            sleep 5
+        fi
+    done
+
+    if [ ${DOWNLOAD_SUCCESS} -eq 0 ]; then
+        log_error "下载失败（已重试 ${DOWNLOAD_RETRIES} 次）: ${BINARY_URL}"
+        log_error "请检查："
+        log_error "  1. 网络连接是否正常"
+        log_error "  2. 代理配置是否正确（如需要）"
+        log_error "  3. GitHub Release 是否存在"
         exit 1
     fi
+
     sudo chmod +x "${DOWNLOAD_PATH}"
     log_success "下载完成"
 fi
