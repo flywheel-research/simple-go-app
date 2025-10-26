@@ -160,10 +160,68 @@ if [ ${BACKUP_COUNT} -gt ${MAX_BACKUPS} ]; then
     log_success "清理完成"
 fi
 
+# 确保 supervisor 服务运行
+ensure_supervisor_service() {
+    log_info "检查 Supervisor 服务状态..."
+
+    # 检查 supervisorctl 是否可用
+    if ! command -v supervisorctl &>/dev/null; then
+        log_warning "supervisorctl 未安装"
+        return 1
+    fi
+
+    # 检查配置目录是否存在
+    if [ ! -d /etc/supervisor/conf.d ]; then
+        log_warning "Supervisor 配置目录不存在"
+        sudo mkdir -p /etc/supervisor/conf.d 2>/dev/null || return 1
+    fi
+
+    # 方法1: 通过 systemd 启动 supervisor
+    if systemctl list-unit-files 2>/dev/null | grep -q supervisor.service; then
+        if ! systemctl is-active --quiet supervisor; then
+            log_info "通过 systemd 启动 Supervisor..."
+            sudo systemctl enable supervisor 2>/dev/null || true
+            sudo systemctl start supervisor 2>/dev/null || log_warning "Supervisor 可能已在运行"
+        fi
+        log_success "Supervisor systemd 服务已启用"
+    else
+        # 方法2: 手动启动 supervisord
+        log_info "systemd 服务不可用，尝试手动启动 supervisord..."
+        if ! pgrep -f supervisord > /dev/null; then
+            # 确保配置文件存在
+            if [ ! -f /etc/supervisor/supervisord.conf ]; then
+                log_info "生成 supervisord 配置文件..."
+                sudo bash -c "echo_supervisord_conf > /etc/supervisor/supervisord.conf" 2>/dev/null || {
+                    log_warning "无法生成配置文件"
+                    return 1
+                }
+            fi
+            # 启动 supervisord
+            sudo supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || {
+                log_warning "supervisord 启动失败"
+                return 1
+            }
+            sleep 2
+        fi
+    fi
+
+    # 验证 supervisord 是否真正运行
+    if pgrep -f supervisord > /dev/null; then
+        log_success "Supervisor 运行正常"
+        return 0
+    else
+        log_warning "Supervisor 未运行"
+        return 1
+    fi
+}
+
 # 检查是否使用 supervisor 管理服务
 USE_SUPERVISOR=false
-if command -v supervisorctl &>/dev/null && [ -d /etc/supervisor/conf.d ]; then
+if ensure_supervisor_service; then
     USE_SUPERVISOR=true
+    log_success "Supervisor 可用，将用于服务管理"
+else
+    log_warning "Supervisor 不可用，将使用手动管理方式"
 fi
 
 # 停止服务
@@ -193,6 +251,13 @@ log_success "部署完成"
 # 配置 supervisor（如果可用）
 if [ "${USE_SUPERVISOR}" = true ]; then
     log_info "配置 supervisor..."
+
+    # 再次确保 supervisor 运行（部署过程中可能被中断）
+    ensure_supervisor_service || {
+        log_error "无法启动 Supervisor"
+        exit 1
+    }
+
     SUPERVISOR_CONF="/etc/supervisor/conf.d/${APP_NAME}.conf"
     sudo tee ${SUPERVISOR_CONF} > /dev/null <<EOF
 [program:${APP_NAME}]
@@ -207,14 +272,21 @@ stderr_logfile=/var/log/${APP_NAME}.log
 environment=PORT="8080",ENV="${ENVIRONMENT}"
 EOF
 
+    # 确保 supervisor 仍在运行
+    ensure_supervisor_service || {
+        log_error "Supervisor 服务异常"
+        exit 1
+    }
+
     # 重载 supervisor 配置
+    log_info "重载 Supervisor 配置..."
     sudo supervisorctl reread
     sudo supervisorctl update
     log_success "Supervisor 配置完成"
 
     # 启动服务
     log_info "启动服务..."
-    sudo supervisorctl start ${APP_NAME}
+    sudo supervisorctl start ${APP_NAME} || log_warning "启动失败，请检查配置"
     sleep 3
 
     # 验证服务状态
